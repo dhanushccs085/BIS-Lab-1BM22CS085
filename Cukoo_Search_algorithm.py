@@ -1,89 +1,87 @@
 import numpy as np
-import math
+from scipy.special import gamma
 
-# Step 1: Define the objective function to optimize
-# Example: A simple sphere function (minimize the sum of squares)
-def objective_function(x):
-    return np.sum(x ** 2)
+class CuckooSearch:
+    def __init__(self, n_nests, n_iterations, alpha, beta, levy_exponent, bounds, num_nodes):
+        self.n_nests = n_nests  # Number of nests
+        self.n_iterations = n_iterations  # Number of iterations
+        self.alpha = alpha  # Step size for Lévy flight
+        self.beta = beta  # Scale of the Lévy flight
+        self.levy_exponent = levy_exponent  # Lévy exponent
+        self.bounds = bounds  # Search space bounds [min, max]
+        self.num_nodes = num_nodes  # Number of sensor nodes
+        self.nests = self.initialize_nests()  # Initialize nests (solutions)
 
-# Step 2: Initialize parameters
-n_nests = 20  # number of nests
-n_iterations = 100  # number of iterations
-pa = 0.25  # probability of discovery
-dim = 5  # dimensionality of the problem (number of variables)
-lower_bound = -5  # lower bound of the search space
-upper_bound = 5  # upper bound of the search space
+    def initialize_nests(self):
+        """Randomly initialize sensor node positions within bounds."""
+        return np.random.uniform(self.bounds[0], self.bounds[1], (self.n_nests, self.num_nodes, 2))
 
-# Step 3: Initialize population of nests with random positions
-def initialize_population(n_nests, dim, lower_bound, upper_bound):
-    nests = np.random.uniform(lower_bound, upper_bound, (n_nests, dim))
-    return nests
+    def evaluate_fitness(self, nest):
+        """
+        Objective function:
+        Minimize total energy consumption, defined as the sum of distances between all nodes
+        (representing communication cost).
+        """
+        total_energy = 0
+        for i in range(len(nest)):
+            for j in range(i + 1, len(nest)):
+                distance = np.linalg.norm(nest[i] - nest[j])
+                total_energy += distance  # Energy is proportional to distance
+        return total_energy
 
-# Step 4: Evaluate fitness
-def evaluate_fitness(nests, objective_function):
-    fitness = np.apply_along_axis(objective_function, 1, nests)
-    return fitness
+    def levy_flight(self):
+        """Generate Lévy flight step sizes."""
+        sigma = (gamma(1 + self.levy_exponent) * np.sin(np.pi * self.levy_exponent / 2) /
+                 (gamma((1 + self.levy_exponent) / 2) * self.levy_exponent * 2 ** ((self.levy_exponent - 1) / 2))) ** (1 / self.levy_exponent)
+        u = np.random.normal(0, sigma, size=(self.num_nodes, 2))
+        v = np.random.normal(0, 1, size=(self.num_nodes, 2))
+        step = u / (np.abs(v) ** (1 / self.levy_exponent))
+        return step
 
-# Step 5: Lévy flight step (for generating new solutions)
-def levy_flight(Lambda, dim):
-    # Generate Lévy flights using the formula
-    beta = 1.5
-    sigma = (math.gamma(1 + beta) * np.sin(math.pi * beta / 2) / 
-             (math.gamma((1 + beta) / 2) * beta * np.power(2, (beta - 1) / 2))) ** (1 / beta)
-    s = np.random.normal(0, sigma, dim)  # Standard normal
-    t = np.random.normal(0, 1, dim)  # Standard normal
-    flight = s / np.power(np.abs(t), 1 / beta)  # Lévy flight
-    return flight
+    def optimize(self):
+        """Main optimization process."""
+        best_nest = self.nests[0]
+        best_fitness = self.evaluate_fitness(best_nest)
 
-# Step 6: Abandon worst nests and replace with new random positions
-def abandon_worst_nests(nests, fitness, pa, lower_bound, upper_bound):
-    # Sort nests by their fitness values (ascending order, best first)
-    sorted_indices = np.argsort(fitness)
-    best_nests = nests[sorted_indices[:int(pa * len(fitness))]]  # Keep the best nests
-    new_nests = np.random.uniform(lower_bound, upper_bound, (len(fitness) - len(best_nests), nests.shape[1]))
-    return np.vstack([best_nests, new_nests])
+        for iteration in range(self.n_iterations):
+            for i in range(self.n_nests):
+                # Perform Lévy flight and update nests
+                step = self.alpha * self.levy_flight()
+                self.nests[i] += step
+                self.nests[i] = np.clip(self.nests[i], self.bounds[0], self.bounds[1])  # Enforce bounds
 
-# Step 7: Cuckoo Search main loop
-def cuckoo_search(n_nests, n_iterations, lower_bound, upper_bound, objective_function, pa=0.25, lambda_=1.5):
-    # Step 3: Initialize population
-    nests = initialize_population(n_nests, dim, lower_bound, upper_bound)
-    fitness = evaluate_fitness(nests, objective_function)
-    
-    # Initialize best solution
-    best_solution = nests[np.argmin(fitness)]
-    best_fitness = np.min(fitness)
+                # Evaluate fitness and replace nests if new solution is better
+                current_fitness = self.evaluate_fitness(self.nests[i])
+                if current_fitness < best_fitness:
+                    best_nest = np.copy(self.nests[i])
+                    best_fitness = current_fitness
 
-    # Main loop
-    for iteration in range(n_iterations):
-        # Step 5: Generate new solutions by Lévy flights
-        for i in range(n_nests):
-            new_nest = nests[i] + levy_flight(lambda_, dim)
-            # Bound check
-            new_nest = np.clip(new_nest, lower_bound, upper_bound)
-            # Evaluate the new solution
-            new_fitness = objective_function(new_nest)
-            # Replace nest if new solution is better
-            if new_fitness < fitness[i]:
-                nests[i] = new_nest
-                fitness[i] = new_fitness
-        
-        # Step 6: Abandon worst nests
-        nests = abandon_worst_nests(nests, fitness, pa, lower_bound, upper_bound)
-        fitness = evaluate_fitness(nests, objective_function)
-        
-        # Update the best solution
-        current_best_solution = nests[np.argmin(fitness)]
-        current_best_fitness = np.min(fitness)
-        if current_best_fitness < best_fitness:
-            best_solution = current_best_solution
-            best_fitness = current_best_fitness
-        
-        # Print progress
-        print(f"Iteration {iteration + 1}: Best fitness = {best_fitness}")
-    
-    return best_solution, best_fitness
+            # Replace worst nests with new random solutions
+            random_nests = self.initialize_nests()[:self.n_nests // 2]
+            self.nests[self.n_nests // 2:] = random_nests
+
+            # Print iteration details
+            print(f"Iteration {iteration + 1}, Best Fitness: {best_fitness}")
+
+        return best_nest, best_fitness
+
+
+# Define problem parameters
+num_nodes = 10  # Number of sensor nodes
+bounds = [0, 100]  # Coordinate bounds for node placement (e.g., 100x100 grid)
+n_nests = 20  # Number of nests (solutions)
+n_iterations = 50  # Number of iterations
+alpha = 0.5  # Lévy flight step size
+beta = 1.5  # Lévy flight scale
+levy_exponent = 1.5  # Lévy flight exponent
 
 # Run the Cuckoo Search algorithm
-best_solution, best_fitness = cuckoo_search(n_nests, n_iterations, lower_bound, upper_bound, objective_function)
-print("Best solution found:", best_solution)
-print("Best fitness:", best_fitness)
+cs = CuckooSearch(n_nests=n_nests, n_iterations=n_iterations, alpha=alpha, beta=beta,
+                  levy_exponent=levy_exponent, bounds=bounds, num_nodes=num_nodes)
+best_solution, best_fitness = cs.optimize()
+
+# Output results
+print("\nOptimal Node Placement:")
+for i, coord in enumerate(best_solution):
+    print(f"Node {i + 1}: {coord}")
+print(f"\nBest Fitness (Total Energy Consumption): {best_fitness}")
